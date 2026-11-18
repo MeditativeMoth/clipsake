@@ -1,0 +1,279 @@
+# Checks, builds and releases.
+#
+# - Every push to main and every pull request (including Dependabot's): install
+#   the locked dependencies, audit them, run the unit tests and smoke-test the
+#   app, on Linux and Windows.
+# - Every Monday at 16:00 UTC: the same checks on main, so a vulnerability
+#   published while the project is quiet still fails a run.
+#   GitHub emails the person who last changed the schedule when it fails.
+# - Manual run (Actions tab > "Build" > Run workflow): also build the Windows
+#   installer, the Linux Flatpak and the macOS disk image and attach them to
+#   the run for 7 days.
+# - Pushing a tag like v0.1.0: build, then publish a GitHub Release with all three.
+#   The tag must match the version in pyproject.toml.
+#
+# Third-party actions are pinned to full commit SHAs (Dependabot updates them).
+
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 16 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  # The event is part of the group so a scheduled audit and a push to main
+  # don't cancel each other.
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_VERSION: "0.13.6"
+  QT_QPA_PLATFORM: offscreen # no screen on the runners
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Install the libraries Qt needs
+        # What the app's Qt modules, the offscreen platform and the multimedia
+        # plugin link to that a bare Ubuntu 24.04 lacks (found with ldd, then
+        # tested there by running the tests and smoke test with just these).
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libgl1 libx11-6 libxext6 libxrandr2 libdrm2 libdbus-1-3 \
+            libfontconfig1 libfreetype6 libglib2.0-0t64 libpulse0 libxkbcommon0
+
+      - name: Install locked dependencies
+        run: uv sync --locked
+
+      - name: Audit dependencies for known vulnerabilities
+        # Audits the exact versions in uv.lock, for every platform (see tools/audit.py).
+        run: uv run --locked python tools/audit.py
+
+      - name: Unit tests
+        run: uv run --locked python -m unittest discover -s tests -v
+
+      - name: Smoke test
+        run: |
+          uv run --locked python -m timeline.clipper --help > /dev/null
+          uv run --locked python -c "from PySide6.QtWidgets import QApplication; from timeline.app import Window; from timeline.theme import apply_dark_theme; from timeline.runtime import prepare_environment; app = QApplication([]); apply_dark_theme(app); Window(prepare_environment()); print('GUI OK')"
+
+  build-windows:
+    needs: check
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-2025
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Check the tag matches the app version
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          $version = uv run --locked python -c "from importlib.metadata import version; print(version('clipsake'))"
+          if ("v$version" -ne $env:TAG) { throw "Tag $env:TAG doesn't match the version in pyproject.toml ($version)" }
+
+      - name: Ensure Inno Setup is installed
+        # Used only if the runner image doesn't already include Inno Setup.
+        # Pinned like everything else in the build; update it deliberately.
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup --version 6.7.1 --no-progress -y
+            if ($LASTEXITCODE -ne 0) { throw "Installing Inno Setup failed" }
+          }
+
+      - name: Build app and installer
+        run: ./build_windows.ps1
+
+      - name: Smoke test the built app
+        # Runs the clipper and the bundled yt-dlp and ypb through the bundle,
+        # as the app does for clips, so missing modules or files show up here.
+        # The app's own executable has no console, so it's run with
+        # Start-Process to wait for it and get its exit code.
+        run: |
+          $app = "dist\ClipSake"
+          $p = Start-Process -FilePath "$app\ClipSake.exe" -ArgumentList "--run", "clipper", "--help" -Wait -PassThru -NoNewWindow -RedirectStandardOutput build\clipper-help.txt
+          if ($p.ExitCode -ne 0) { throw "clipper check failed" }
+          & "$app\yt-dlp.exe" --version
+          if ($LASTEXITCODE -ne 0) { throw "bundled yt-dlp check failed" }
+          & "$app\_internal\ypb.exe" version
+          if ($LASTEXITCODE -ne 0) { throw "bundled ypb check failed" }
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ClipSake-Setup
+          path: dist/installer/*.exe
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0 # the installer is already compressed
+
+  build-flatpak:
+    needs: check
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      APP_ID: io.github.MeditativeMoth.ClipSake
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Check the tag matches the app version
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="$(uv run --locked python -c "from importlib.metadata import version; print(version('clipsake'))")"
+          [[ "v$version" == "$TAG" ]] || { echo "Tag $TAG doesn't match the version in pyproject.toml ($version)"; exit 1; }
+
+      - name: Install Flathub's flatpak-builder and GNOME's runtime and SDK
+        # Flathub's org.flatpak.Builder rather than Ubuntu's flatpak-builder,
+        # whose older appstreamcli fails to compose the app's metadata.
+        # build_flatpak.sh uses it when there's no flatpak-builder command.
+        # dbus-daemon gives the builds below a session bus (dbus-run-session):
+        # the Builder finds the installed runtimes through Flatpak's session
+        # helper, and without a bus it fails with "Unable to find sdk".
+        # Ubuntu blocks the unprivileged user namespaces that Flatpak's
+        # sandbox (bubblewrap) uses; the runner is a throwaway VM.
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak dbus-daemon
+          sudo flatpak remote-add --system --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          sudo flatpak install --system --noninteractive flathub org.flatpak.Builder org.gnome.Platform//51 org.gnome.Sdk//51
+
+      - name: Build the Flatpak
+        run: dbus-run-session -- ./build_flatpak.sh
+
+      - name: Smoke test the Flatpak
+        # Installs the bundle and runs the clipper, the bundled programs and
+        # the window (without a screen) inside its sandbox.
+        shell: dbus-run-session -- bash -e {0}
+        run: |
+          flatpak install --user --noninteractive dist/*.flatpak
+          flatpak run --command=python3 "$APP_ID" -m timeline.clipper --help > /dev/null
+          flatpak run --command=yt-dlp "$APP_ID" --version
+          flatpak run --command=ypb "$APP_ID" version
+          flatpak run --command=ffmpeg "$APP_ID" -version | head -1
+          flatpak run --command=deno "$APP_ID" --version
+          flatpak run --env=QT_QPA_PLATFORM=offscreen --command=python3 "$APP_ID" -c "from PySide6.QtWidgets import QApplication; from timeline.app import Window; from timeline.theme import apply_dark_theme; from timeline.runtime import prepare_environment; app = QApplication([]); apply_dark_theme(app); Window(prepare_environment()); print('GUI OK')"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ClipSake-Flatpak
+          path: dist/*.flatpak
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0 # the bundle is already compressed
+
+  build-macos:
+    needs: check
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    # Apple Silicon. In a private repository, macOS minutes count ten times
+    # against the monthly allowance, so this only runs for manual runs and tags.
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Check the tag matches the app version
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="$(uv run --locked python -c "from importlib.metadata import version; print(version('clipsake'))")"
+          [[ "v$version" == "$TAG" ]] || { echo "Tag $TAG doesn't match the version in pyproject.toml ($version)"; exit 1; }
+
+      - name: Unit tests
+        # The checks above don't run on macOS (its minutes cost more), so here.
+        run: uv run --locked python -m unittest discover -s tests -v
+
+      - name: Build app and disk image
+        run: ./build_macos.sh
+
+      - name: Smoke test the built app
+        # Runs the clipper and the bundled programs through the bundle, as the
+        # app does for clips, so missing modules or files show up here; then
+        # checks the app's (ad hoc) signature and the disk image.
+        run: |
+          app="dist/ClipSake.app/Contents"
+          "$app/MacOS/ClipSake" --run clipper --help > /dev/null
+          "$app/MacOS/yt-dlp" --version
+          "$app/Frameworks/ypb" version
+          "$app/Frameworks/ffmpeg" -version | head -1
+          "$app/Frameworks/ffprobe" -version | head -1
+          "$app/Frameworks/deno" --version
+          codesign --verify --deep --strict "dist/ClipSake.app"
+          hdiutil verify dist/installer/*.dmg
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ClipSake-macOS
+          path: dist/installer/*.dmg
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0 # the disk image is already compressed
+
+  release:
+    needs: [build-windows, build-flatpak, build-macos]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # only this job can create releases
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: ClipSake-*
+          path: release
+          merge-multiple: true
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" release/*.exe release/*.flatpak release/*.dmg --repo "$GITHUB_REPOSITORY" --title "ClipSake $TAG" --generate-notes

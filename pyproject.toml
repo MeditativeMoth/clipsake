@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=77"]  # 77: license as an SPDX expression
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "clipsake"
+version = "0.0.1"
+description = "Pick a YouTube live stream clip on a timeline with still previews"
+requires-python = ">=3.12"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE", "licenses/*", "THIRD_PARTY_NOTICES.md"]
+dependencies = [
+    "PySide6-Essentials>=6.12.0",  # must match PySide6-Addons
+    "PySide6-Addons>=6.12.0",  # Qt Multimedia, for playing clip previews
+    "yt-dlp[default]>=2025.10",
+    "deno>=2.0",            # JS runtime yt-dlp needs for YouTube extraction
+    "tzdata>=2026.2",       # zone database for zoneinfo, often newer than the OS's
+    "certifi>=2024.2.2",    # CA certificates for tools/pinned.py's downloads
+]
+
+[project.gui-scripts]
+clipsake = "timeline.app:main"
+
+[dependency-groups]
+dev = [
+    "pyinstaller>=6.10",  # builds the standalone app (clipsake.spec)
+    "pip-audit>=2.7",     # checks locked versions against known vulnerabilities
+    "packaging>=24",      # wheel tags and markers, for tools/flatpak_sources.py
+]
+
+[tool.uv]
+# Always a uv-managed Python; mutagen (GPL) comes in
+# through yt-dlp[default] but is only used for embedding thumbnails, which
+# isn't done here.
+python-preference = "only-managed"
+exclude-dependencies = ["mutagen"]
+# Only package files that have been on PyPI for a week, so a malicious or
+# broken release has time to be caught; yt-dlp gets a shorter wait, since it
+# breaks whenever YouTube changes. For an urgent yt-dlp fix:
+#     uv lock --upgrade-package yt-dlp --exclude-newer-package "yt-dlp=1 hour"
+exclude-newer = "7 days"
+exclude-newer-package = { yt-dlp = "2 days", yt-dlp-ejs = "2 days" }
+# Security floors for indirect dependencies (GHSA-9v8h-qqgm-4m35, a decoder
+# out-of-bounds write reachable from downloaded data).
+constraint-dependencies = ["brotli>=1.2.1", "brotlicffi>=1.2.1.0"]
+
+[tool.setuptools]
+packages = ["timeline"]
+
+[tool.setuptools.package-data]
+timeline = ["ytdlp_plugins/**/*.py", "*.svg", "assets/*"]

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=ClipSake
+Comment=Clip past moments of YouTube live streams
+Exec=clipsake %u
+Icon=io.github.MeditativeMoth.ClipSake
+Terminal=false
+Categories=AudioVideo;Video;

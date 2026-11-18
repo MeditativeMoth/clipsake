@@ -1,0 +1,49 @@
+# Weekly check for new releases of the programs pinned in tools/pinned.py
+# (ypb and ffmpeg), which Dependabot and pip-audit can't see.
+#
+# - Every Monday at 16:30 UTC, and on manual runs
+#   (Actions tab > "Check pinned tools" > Run workflow).
+# - For each newer release, or a pinned BtbN build that BtbN will soon delete,
+#   it opens a GitHub issue with the links needed to update. Each version is
+#   reported once, even if its issue was closed. GitHub emails the repository's
+#   watchers about new issues.
+# - It never changes the pins or builds anything: a new ypb or ffmpeg should be
+#   tried on real streams first.
+#
+# Third-party actions are pinned to full commit SHAs (Dependabot updates them).
+
+name: Check pinned tools
+
+on:
+  schedule:
+    - cron: "30 16 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write # to open an issue for each finding
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  UV_VERSION: "0.13.6"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Check for newer releases and report them
+        env:
+          GH_TOKEN: ${{ github.token }} # for gh, and for GitHub's API rate limit
+        run: uv run --locked --no-dev python tools/check_pinned.py --create-issues

@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.egg-info/
+build/
+dist/
+# Written by tools/flatpak_sources.py from uv.lock and tools/pinned.py on each build.
+packaging/flatpak/python-packages.json
+packaging/flatpak/pinned-programs.json

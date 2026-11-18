@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.MeditativeMoth.ClipSake</id>
+  <name>ClipSake</name>
+  <summary>Clip past moments of YouTube live streams</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <developer id="io.github.meditativemoth">
+    <name>MeditativeMoth</name>
+  </developer>
+  <description>
+    <p>
+      Grab a video clip from a YouTube live stream using a timeline with still
+      previews.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.MeditativeMoth.ClipSake.desktop</launchable>
+  <url type="homepage">https://github.com/MeditativeMoth/clipsake</url>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.0.1" date="2026-11-08"/>
+  </releases>
+</component>

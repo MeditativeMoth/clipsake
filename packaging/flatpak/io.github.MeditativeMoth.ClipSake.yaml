@@ -1,0 +1,49 @@
+# Flatpak manifest. Build it with build_flatpak.sh, from the project root.
+# python-packages.json and pinned-programs.json are written by
+# tools/flatpak_sources.py from uv.lock and tools/pinned.py (build_flatpak.sh
+# runs it first): flatpak-builder downloads each file listed there, checks
+# its SHA-256, then builds without network access.
+id: io.github.MeditativeMoth.ClipSake
+# GNOME's runtime rather than the plain freedesktop one it's built on: it
+# also has Kerberos, which Qt's network and video libraries need.
+runtime: org.gnome.Platform
+runtime-version: '51'  # its Python and glibc are in tools/flatpak_sources.py
+sdk: org.gnome.Sdk
+command: clipsake
+finish-args:
+  - --share=network  # YouTube
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --socket=pulseaudio  # the sound of clip previews
+  - --device=dri  # hardware video decoding and OpenGL
+  # The usual place to save clips. The clipper works in a folder next to the
+  # clip; elsewhere (saved through the file chooser's portal) it works in the
+  # app's cache folder and copies the clip when done.
+  - --filesystem=xdg-videos
+  # Python would otherwise load code from the app's own data folder
+  # (~/.var/app/<id>/data/python), which the app can write to.
+  - --env=PYTHONNOUSERSITE=1
+build-options:
+  # Prebuilt programs (ypb, ffmpeg, deno, Qt): nothing to gain from
+  # splitting out debug info, and stripping them is slow.
+  no-debuginfo: true
+  strip: false
+modules:
+  - pinned-programs.json
+  - python-packages.json
+  - name: clipsake
+    buildsystem: simple
+    build-commands:
+      - pip3 install --no-index --no-deps --no-build-isolation --no-compile --prefix="$FLATPAK_DEST" .
+      # Most of Qt isn't used: see trim_qt.py. Nor are PySide6's developer tools.
+      - python3 packaging/flatpak/trim_qt.py "$FLATPAK_DEST"/lib/python3.*/site-packages/PySide6
+      - rm -f "$FLATPAK_DEST"/bin/pyside6-*
+      - install -Dm644 packaging/flatpak/$FLATPAK_ID.desktop -t "$FLATPAK_DEST/share/applications"
+      - install -Dm644 packaging/flatpak/$FLATPAK_ID.metainfo.xml -t "$FLATPAK_DEST/share/metainfo"
+      - install -Dm644 timeline/assets/clipsake.svg "$FLATPAK_DEST/share/icons/hicolor/scalable/apps/$FLATPAK_ID.svg"
+      # This app's license, and the bundled software's (see THIRD_PARTY_NOTICES.md).
+      - install -Dm644 LICENSE THIRD_PARTY_NOTICES.md licenses/LGPL-3.0.txt -t "$FLATPAK_DEST/share/licenses/$FLATPAK_ID"
+    sources:
+      - type: dir
+        path: ../..
+        skip: [.git, .venv, build, dist, .flatpak-builder, .ruff_cache]
