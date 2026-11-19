@@ -207,9 +207,11 @@ jobs:
   build-macos:
     needs: check
     if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
-    # Apple Silicon. In a private repository, macOS minutes count ten times
-    # against the monthly allowance, so this only runs for manual runs and tags.
-    runs-on: macos-15
+    # Apple Silicon (build_macos.sh refuses anything else). macos-latest rather
+    # than a fixed version: it has the most of GitHub's free Macs, which are
+    # scarce, so a fixed label can go hours without one. Free Macs being
+    # scarce is also why this only runs for manual runs and tags.
+    runs-on: macos-latest
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
